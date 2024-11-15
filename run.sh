@@ -1,0 +1,1 @@
+python3 train.py --train-data-path /mnt/data/training_pkl_raw --val-data-path /mnt/data/training_pkl_tmp/split_1 --checkpoints-path /mnt/data/checkpoints/baseline --config config/baseline.yaml --event-log-path /mnt/data/event_log/baseline
