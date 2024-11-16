@@ -15,16 +15,23 @@ class Loss(ABC, nn.Module):
         assert sigma_xx.shape == sigma_yy.shape
         batch_size, n_modes, n_future_timstamps = \
             sigma_xx.shape[0], sigma_xx.shape[1], sigma_xx.shape[2]
+
+        alpha = (sigma_xy * sigma_yx) / (sigma_xx * sigma_yy) + (1.0 / (2.0 * sigma_xx * sigma_yy))
+
+        sigma_xx = torch.sqrt(alpha) * sigma_xx
+        sigma_yy = torch.sqrt(alpha) * sigma_yy
+
+        det = (sigma_xx * sigma_yy - sigma_xy * sigma_yx)
         
         # sigma_xx, sigma_xy, sigma_yx, sigma_yy must be positive.
-        sigma_xx_inv = 1 / (sigma_xx)
-        sigma_xy_inv = 1 / (sigma_xy)
-        sigma_yx_inv = 1 / (sigma_yx)
-        sigma_yy_inv = 1 / (sigma_yy)
+        sigma_xx_inv = sigma_xx / det 
+        sigma_xy_inv = sigma_xy / det
+        sigma_yx_inv = sigma_yx / det 
+        sigma_yy_inv = sigma_yy / det 
 
         return torch.cat(
-            [sigma_xx_inv, sigma_xy_inv, sigma_yx_inv, sigma_yy_inv], dim=-1) \
-            .reshape(batch_size, n_modes, n_future_timstamps, 2, 2)
+            [sigma_yy_inv, -sigma_xy_inv, -sigma_yx_inv, sigma_xx_inv], dim=-1) \
+            .reshape(batch_size, n_modes, n_future_timstamps, 2, 2), det
 
     def _log_N_conf(self, data_dict, prediction_dict):
         gt = data_dict['gt_path'].unsqueeze(1)
@@ -34,14 +41,16 @@ class Loss(ABC, nn.Module):
         nan_mask = torch.isnan(diff)
         if inf_mask.any():
             logging.info("diff contains infinity values.")
+            print("diff contains infinity values.")
         if nan_mask.any():
             logging.info("diff contains NaN values.")
+            print("diff contains NaN values.")
 
         #set diff to nan 
         diff[torch.isnan(diff)] = 0 # mean 
         assert torch.isfinite(diff).all()
 
-        precision_matrices = self._precision_matrix(
+        precision_matrices, det = self._precision_matrix(
             prediction_dict['sigma_xx'],
             prediction_dict['sigma_xy'],
             prediction_dict['sigma_yx'], 
@@ -52,8 +61,10 @@ class Loss(ABC, nn.Module):
         nan_mask = torch.isnan(precision_matrices)
         if inf_mask.any():
             logging.info("precision contains infinity values.")
+            print("precision contains infinity values.")
         if nan_mask.any():
             logging.info("precision contains NaN values.")
+            print("precision contains NaN values.")
 
         #set precision to nan
         precision_matrices[torch.isnan(precision_matrices)] = 0
@@ -69,7 +80,7 @@ class Loss(ABC, nn.Module):
         #bilinear = torch.clamp(bilinear, min=0)
         assert torch.isfinite(bilinear).all()
 
-        conv_matrix = torch.clamp(prediction_dict['sigma_xx'] * prediction_dict['sigma_yy'] - prediction_dict['sigma_yx'] * prediction_dict['sigma_xy'], min=1e-6, max=1e6) 
+        conv_matrix = torch.clamp(det, min=1e-6, max=1e6) 
         log_conv_matrix = torch.log(conv_matrix).squeeze(-1)  # (between -13, 13)
         log_N = -0.5 * np.log(2 * np.pi) - 0.5 * log_conv_matrix - 0.5 * bilinear # between (0, 1)
         return log_N, log_confidences
@@ -85,8 +96,10 @@ class NLLGaussian2d(Loss):
         nan_mask = torch.isnan(log_N)
         if inf_mask.any():
             logging.info("logN contains infinity values.")
+            print("logN contains infinity values.")
         if nan_mask.any():
             logging.info("logN contains NaN values.")
+            print("logN contains NaN values.")
         log_N[torch.isnan(log_N)] = 0
         assert torch.isfinite(log_N).all()
         adjust_log_N = log_N.sum(dim=2) + log_confidences

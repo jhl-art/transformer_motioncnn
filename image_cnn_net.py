@@ -113,13 +113,14 @@ class SequentialMotionCNN(nn.Module):
                 processed_cnn_output = torch.cat((processed_cnn_output, output.unsqueeze(0)), dim=0)
         processed_cnn_output = processed_cnn_output.to('cuda')
         atten_output = self.self_attention_layer(processed_cnn_output).permute(1,0,2)
-        # normalized_atten_output = self.layer_norm(atten_output)
+        normalized_atten_output = self.layer_norm(atten_output)
+        print(normalized_atten_output)
         # activated_output = torch.relu(normalized_atten_output)
         
-        b,h,w = atten_output.shape
-        atten_output = atten_output.reshape(b, h*w).to('cuda')
+        b,h,w = normalized_atten_output.shape
+        normalized_atten_output = normalized_atten_output.reshape(b, h*w).to('cuda')
         torch.cuda.empty_cache()
-        fc = self.fc_layer(atten_output)
+        fc = self.fc_layer(normalized_atten_output)
         return fc
         
         
