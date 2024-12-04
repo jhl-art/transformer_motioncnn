@@ -21,7 +21,7 @@ class Loss(ABC, nn.Module):
         sigma_xx = torch.sqrt(alpha) * sigma_xx
         sigma_yy = torch.sqrt(alpha) * sigma_yy
 
-        det = (sigma_xx * sigma_yy - sigma_xy * sigma_yx)
+        det = (sigma_xx * sigma_yy - sigma_xy * sigma_yx)  # det is positive 
         
         # sigma_xx, sigma_xy, sigma_yx, sigma_yy must be positive.
         sigma_xx_inv = sigma_xx / det 
@@ -77,13 +77,16 @@ class Loss(ABC, nn.Module):
 
         bilinear = torch.matmul(torch.matmul(diff.unsqueeze(-2), precision_matrices), diff.unsqueeze(-1))
         bilinear = bilinear[:, :, :, 0, 0]
+
+
         #bilinear = torch.clamp(bilinear, min=0)
         assert torch.isfinite(bilinear).all()
 
         conv_matrix = torch.clamp(det, min=1e-6, max=1e6) 
         log_conv_matrix = torch.log(conv_matrix).squeeze(-1)  # (between -13, 13)
         log_N = -0.5 * np.log(2 * np.pi) - 0.5 * log_conv_matrix - 0.5 * bilinear # between (0, 1)
-        return log_N, log_confidences
+        torch.set_printoptions(sci_mode=False)
+        return log_N, log_confidences, torch.norm(diff)
 
 
 class NLLGaussian2d(Loss):
@@ -91,7 +94,7 @@ class NLLGaussian2d(Loss):
         super().__init__()
 
     def forward(self, data_dict, prediction_dict):
-        log_N, log_confidences = self._log_N_conf(data_dict, prediction_dict)
+        log_N, log_confidences, diff = self._log_N_conf(data_dict, prediction_dict)
         inf_mask = torch.isinf(log_N)
         nan_mask = torch.isnan(log_N)
         if inf_mask.any():
@@ -104,5 +107,6 @@ class NLLGaussian2d(Loss):
         assert torch.isfinite(log_N).all()
         adjust_log_N = log_N.sum(dim=2) + log_confidences
         log_L = torch.logsumexp(adjust_log_N, dim=1)
+        difference_loss = diff
         assert torch.isfinite(log_L).all()
         return -log_L.mean()

@@ -12,6 +12,7 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from torch.optim import Adam
 from image_cnn_net import SequentialMotionCNN
+from evaluator import Evaluator
 from loss import NLLGaussian2d
 from postprocess import PostProcess
 from torch.profiler import profile, record_function, ProfilerActivity
@@ -22,13 +23,14 @@ writer = SummaryWriter("/mnt/data/image_cnn/runs/softmax_log")
 class MotionCNNDataset(Dataset):
     def __init__(self, data_path) -> None:
         super().__init__()
-        self._files = glob(f"{data_path}/**/*.pkl", recursive=True)
+        self._files = glob(f"{data_path}/**/**/*.pkl", recursive=True)
 
     def __len__(self):
         return len(self._files)
 
     def __getitem__(self, idx):
         data = dict(np.load(self._files[idx], allow_pickle=True))
+        data["pickle_filename"] = self._files[idx]
         return data
 
 def dict_to_cuda(data):
@@ -56,7 +58,9 @@ def parse_arguments():
         "--config", type=str, required=True, help="Config file path")
     parser.add_argument("--multi-gpu", action='store_true')
     parser.add_argument("--event-log-path",type=str, required=True,
-        help="Path to training data")
+        help="Path to tensorboard event")
+    parser.add_argument("--evaluator-dump-path",type=str, required=True,
+        help="Path to evaluator path")
     args = parser.parse_args()
     return args
 
@@ -67,13 +71,14 @@ def main():
     training_config = general_config['training']
     config_name = args.config.split('/')[-1].split('.')[0]
     model = SequentialMotionCNN(model_config).to('cuda')
-    optimizer = Adam(model.parameters(), **training_config['optimizer'])
+    optimizer = Adam(model.parameters(), lr=0.001, betas=(0.9, 0.999), eps=1e-08, weight_decay=0.01)
     loss_module = NLLGaussian2d().to('cuda')
     processed_batches = 0
     epochs_processed = 0
     train_losses = []
     print("event log path: ", args.event_log_path)
     writer = SummaryWriter(args.event_log_path)
+    evaluator = Evaluator(args.evaluator_dump_path)
     experiment_checkpoints_dir = os.path.join(
         args.checkpoints_path, config_name)
     if not os.path.exists(experiment_checkpoints_dir):
@@ -97,6 +102,7 @@ def main():
         **training_config['val_dataloader'])
     post_processer = PostProcess(model_config)
 
+    accumulation_steps = 4
     for epochs_processed in tqdm(
             range(epochs_processed, training_config['num_epochs']),
             total=training_config['num_epochs'],
@@ -114,7 +120,9 @@ def main():
                 prediction_tensor, model_config)
             loss = loss_module(train_data, prediction_dict)
             loss.backward()
-            optimizer.step()
+            if (processed_batches + 1) % accumulation_steps == 0:
+                optimizer.step()
+                optimizer.zero_grad()
             train_losses.append(loss.item())
             running_loss += loss.item()
             processed_batches += 1
@@ -124,6 +132,7 @@ def main():
                 del train_data
                 torch.cuda.empty_cache()
                 with torch.no_grad():
+                    validation_loss = 0.0
                     for eval_data in tqdm(validation_dataloader):
                         eval_data,data_path = dict_to_cuda(eval_data)
                         prediction_tensor = model(eval_data)
@@ -131,17 +140,26 @@ def main():
                              post_processer.postprocess_predictions(
                             prediction_tensor, model_config)
                         loss = loss_module(eval_data, prediction_dict)
-                if  isinstance(model, nn.DataParallel):
-                    model_state_dict = model.module.state_dict()
-                else:
-                    model_state_dict = model.state_dict()
-                torch_checkpoint_data = {
-                    "model_state_dict": model_state_dict,
-                    "epochs_processed": epochs_processed}
-                torch_checkpoint_path = os.path.join(
-                    experiment_checkpoints_dir,
-                    f'e{epochs_processed}_b{processed_batches}.pth')
-                torch.save(torch_checkpoint_data, torch_checkpoint_path)
+                        validation_loss += loss.item()
+                        # mse, fde = evaluator.calculate_top1_mse_and_fde(prediction_dict, eval_data)
+                        # weight_mse, weighted_fde = evaluator.calculate_multitrajectory_mse_and_fde(prediction_dict, eval_data)
+                        # evaluator.dump_visualization(prediction_dict, eval_data, processed_batches)
+                        # evaluator.dump_batch_result(mse, fde,weight_mse, weighted_fde, processed_batches)
+                    avg_validation_loss = validation_loss / len(validation_dataloader)
+                    writer.add_scalar("Validation Loss", avg_validation_loss, epochs_processed)
+                    print("validation loss: ", avg_validation_loss)
+
+        if  isinstance(model, nn.DataParallel):
+            model_state_dict = model.module.state_dict()
+        else:
+            model_state_dict = model.state_dict()
+            torch_checkpoint_data = {
+                "model_state_dict": model_state_dict,
+                "epochs_processed": epochs_processed}
+            torch_checkpoint_path = os.path.join(
+                experiment_checkpoints_dir,
+                f'e{epochs_processed}_b{processed_batches}.pth')
+        torch.save(torch_checkpoint_data, torch_checkpoint_path)
         avg_loss = running_loss / len(training_dataloader)
         writer.add_scalar("Training Loss", avg_loss, epochs_processed)
 
